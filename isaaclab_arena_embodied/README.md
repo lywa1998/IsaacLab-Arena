@@ -49,7 +49,7 @@ python isaaclab_arena/evaluation/policy_runner.py \
   --policy_type isaaclab_arena_embodied.policy.embodied_dora_policy.EmbodiedDoraPolicy \
   --dora_policy_bin /path/to/embodied-rs/target/release/dora-policy \
   --model_dir /path/to/models/lerobot/smolvla_libero \
-  --device cuda \
+  --dora_device cuda \
   --policy_device cuda \
   --spawn_policy \
   --language_instruction "pick up the cube" \

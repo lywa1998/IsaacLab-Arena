@@ -101,7 +101,7 @@ class EmbodiedDoraPolicy(PolicyBase[EmbodiedDoraPolicyCfg]):
         return build_dora_policy_argv(
             dora_policy_bin=config.dora_policy_bin,
             model_dir=config.model_dir,
-            device=config.device,
+            device=config.dora_device,
             unnorm_key=config.unnorm_key,
             inference_steps=config.inference_steps,
         )
@@ -174,3 +174,12 @@ class EmbodiedDoraPolicy(PolicyBase[EmbodiedDoraPolicyCfg]):
         if self._client is not None:
             self._client.close()
             self._client = None
+
+    def shutdown_remote(self, kill_server: bool = False) -> None:
+        """Arena policy_runner cleanup for ``is_remote`` policies.
+
+        ``kill_server`` is ignored for the local ``dora-policy`` child process:
+        we always terminate the spawned stdio client (if any).
+        """
+        _ = kill_server
+        self.close()

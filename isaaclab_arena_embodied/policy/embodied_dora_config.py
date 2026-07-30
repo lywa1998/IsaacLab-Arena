@@ -37,8 +37,12 @@ class EmbodiedDoraPolicyCfg(PolicyCfg):
     model_dir: str | None = None
     """LeRobot / HF package directory (only used when spawning dora-policy)."""
 
-    device: str = "flex"
-    """``--device`` for spawned dora-policy (flex|metal|cuda|…)."""
+    dora_device: str = "cuda"
+    """Backend for spawned ``dora-policy`` (flex|metal|cuda|…).
+
+    Named ``dora_device`` (not ``device``) so it does not clash with Arena's
+    shared ``--device`` CLI flag (default ``cuda:0``).
+    """
 
     inference_steps: int = 0
     """FM steps for SmolVLA; 0 = package default."""
