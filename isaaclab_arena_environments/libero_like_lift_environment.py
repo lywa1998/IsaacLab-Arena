@@ -33,8 +33,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class LiberoLikeLiftEnvironmentCfg(ArenaEnvironmentCfg):
-    """Configure LIBERO-like lift environment."""
+    """Configure LIBERO-like lift environment.
 
+    ``enable_cameras`` is declared on the child (not only via base) so CLI
+    reconstruction works on Arena trees whose ``ArenaEnvironmentCfg`` is still
+    an empty marker (university deploy).
+    """
+
+    enable_cameras: bool = False
     object: str = "dex_cube"
     background: str = "table"
     embodiment: str = "franka_ik"
