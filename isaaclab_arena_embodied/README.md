@@ -1,14 +1,15 @@
 # isaaclab_arena_embodied
 
-Arena **world-side** bridge to [embodied-rs](https://github.com/ptrdlr14/embodied-rs):
+Arena **world-side** bridge to [embodied-rs](https://github.com/ptrdlr14/embodied-rs) and (eval-only) LeRobot async server:
 
 | Layer | Location |
 |-------|----------|
 | T1 (body layout) | `adapters/smolvla_libero.py` |
-| Chunk pop | `EmbodiedDoraPolicy.get_action` |
-| T2 + predict + unnorm | **embodied-rs** `dora-policy` / PolicyEngine |
+| Chunk pop | `EmbodiedDoraPolicy` / `EmbodiedLerobotAsyncPolicy` |
+| **Production** T2 + predict + unnorm | **embodied-rs** `dora-policy` / PolicyEngine (stdio) |
+| **Eval** T2 + predict + unnorm | LeRobot `async_inference.policy_server` (gRPC) |
 
-Transport: **stdio JSONL** (`dora-policy --stdio-loop`), not WebSocket/gRPC.
+Production transport remains **Dora / stdio** (DESIGN.md). LeRobot gRPC is for **protocol eval / diagnosis** only.
 
 ## Install
 
@@ -59,11 +60,47 @@ python isaaclab_arena/evaluation/policy_runner.py \
 
 Prefer embodiment **`franka_ik`** (7-D relative EE) over absolute joint_pos for `smolvla_libero`.
 
+## Eval: LeRobot async server + Arena client
+
+Terminal A — start LeRobot policy server (loads model on first client `SendPolicyInstructions`):
+
+```bash
+# university: see embodied-rs scripts/run_lerobot_async_server.sh
+python -m lerobot.async_inference.policy_server --host=0.0.0.0 --port=8080 --fps=30
+```
+
+Terminal B — Arena closed-loop client:
+
+```bash
+python isaaclab_arena/evaluation/policy_runner.py \
+  --policy_type isaaclab_arena_embodied.policy.lerobot_async_policy.EmbodiedLerobotAsyncPolicy \
+  --pretrained_name_or_path /path/to/models/lerobot/smolvla_libero \
+  --server_host 127.0.0.1 \
+  --server_port 8080 \
+  --server_policy_device cuda \
+  --lerobot_policy_type smolvla \
+  --policy_device cuda \
+  --ee_action_scale 2.0 \
+  --align_axis_angle \
+  --language_instruction "pick up the cube" \
+  --num_episodes 1 \
+  --enable_cameras \
+  --record_camera_video \
+  cube_goal_pose
+```
+
+Or one-shot spawn from Arena: `--spawn_server --server_python /usr/bin/python3.12`.
+
+Helper scripts (embodied-rs repo):
+
+- `scripts/run_lerobot_async_server.sh`
+- `scripts/run_arena_lerobot_async_eval.sh`
+
 ## Profile alignment
 
 See embodied-rs `deploy/profiles/smolvla_libero.yaml`:
 
 - state dim **8**: eef_pos + axis_angle + gripper_qpos(2)
 - images: camera1/2/3, 256²; **flip_hw_180 default false** (Arena upright)
-- action dim **7**, unnorm only in dora-policy
-- diagnosis: `--state_ablation none|zero|mean`, `--diag_log_chunks N`
+- action dim **7**, unnorm on server (dora-policy **or** LeRobot postprocessor)
+- diagnosis: `--state_ablation none|zero|mean`, `--diag_log_chunks N`, `--invert_ee_pos`

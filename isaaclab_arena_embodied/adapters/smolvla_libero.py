@@ -29,6 +29,8 @@ ACTION_DIM = 7
 CAMERA1_KEY = "camera1"
 CAMERA2_KEY = "camera2"
 CAMERA3_KEY = "camera3"
+# Flat state names for LeRobot async_inference raw obs / build_dataset_frame.
+STATE_NAMES = tuple(f"s{i}" for i in range(STATE_DIM))
 
 # From models/lerobot/smolvla_libero policy_preprocessor normalizer
 # (observation.state.mean / .std). Used for OOD z-score logs and state_ablation=mean.
@@ -222,6 +224,33 @@ class SmolVlaLiberoAdapter:
             "lang_features": None,
         }
 
+    def to_lerobot_async_raw_obs(
+        self,
+        extracted: SmolVlaExtracted,
+        *,
+        instruction: str,
+    ) -> dict[str, Any]:
+        """Pack Arena extract into LeRobot ``async_inference`` raw robot observation.
+
+        Keys match :func:`smolvla_libero_lerobot_features` / ``build_dataset_frame``:
+        scalar state names ``s0..s7``, camera HWCs named ``camera1/2/3``, plus ``task``.
+        Unnorm / MEAN_STD happen on the LeRobot policy server preprocessor.
+        """
+        a = resize_hwc(extracted.agentview_hwc, self.image_size)
+        w = resize_hwc(extracted.wrist_hwc, self.image_size)
+        if self.flip_hw_180:
+            a = flip_hw_180(a)
+            w = flip_hw_180(w)
+        wire_state = apply_state_ablation(extracted.state, self.state_ablation)
+        raw: dict[str, Any] = {
+            name: float(wire_state[i]) for i, name in enumerate(STATE_NAMES)
+        }
+        raw[CAMERA1_KEY] = np.ascontiguousarray(a, dtype=np.uint8)
+        raw[CAMERA2_KEY] = np.ascontiguousarray(w, dtype=np.uint8)
+        raw[CAMERA3_KEY] = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+        raw["task"] = instruction
+        return raw
+
     def diagnose_state(self, state: np.ndarray) -> dict[str, Any]:
         """Return raw state, z-scores vs LIBERO stats, and ablation wire state."""
         raw = np.asarray(state, dtype=np.float32).reshape(-1)
@@ -364,6 +393,25 @@ def state_z_scores(
     for i in range(n):
         z[i] = (s[i] - m[i]) / max(abs(float(d[i])), eps)
     return z
+
+
+def smolvla_libero_lerobot_features(*, image_size: int = IMAGE_SIZE) -> dict[str, dict[str, Any]]:
+    """LeRobot dataset-style features for ``RemotePolicyConfig.lerobot_features``."""
+    h = w = int(image_size)
+    feats: dict[str, dict[str, Any]] = {
+        "observation.state": {
+            "dtype": "float32",
+            "shape": [STATE_DIM],
+            "names": list(STATE_NAMES),
+        },
+    }
+    for cam in (CAMERA1_KEY, CAMERA2_KEY, CAMERA3_KEY):
+        feats[f"observation.images.{cam}"] = {
+            "dtype": "image",
+            "shape": [h, w, 3],
+            "names": ["height", "width", "channels"],
+        }
+    return feats
 
 
 def apply_state_ablation(state: np.ndarray, mode: str) -> np.ndarray:
