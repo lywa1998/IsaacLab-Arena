@@ -40,6 +40,8 @@ def _resolve_adapter(name: str, cfg: EmbodiedDoraPolicyCfg) -> SmolVlaLiberoAdap
         flip_hw_180=cfg.flip_hw_180,
         state_ablation=cfg.state_ablation,
         align_axis_angle=cfg.align_axis_angle,
+        align_eef_frame=cfg.align_eef_frame,
+        action_unit=cfg.action_unit,
     )
 
 
@@ -65,7 +67,8 @@ class EmbodiedDoraPolicy(PolicyBase[EmbodiedDoraPolicyCfg]):
         self._diag_logged = 0
         print(
             f"[EmbodiedDoraPolicy] adapter=smolvla_libero flip_hw_180={config.flip_hw_180} "
-            f"ee_action_scale={config.ee_action_scale} state_ablation={config.state_ablation} "
+            f"action_unit={config.action_unit} ee_action_scale={config.ee_action_scale} "
+            f"align_eef_frame={config.align_eef_frame} state_ablation={config.state_ablation} "
             f"align_axis_angle={config.align_axis_angle} invert_ee_pos={config.invert_ee_pos} "
             f"invert_ee_rot={config.invert_ee_rot} diag_log_chunks={self._diag_log_chunks}"
         )

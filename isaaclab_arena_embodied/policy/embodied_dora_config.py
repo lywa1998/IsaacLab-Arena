@@ -64,7 +64,7 @@ class EmbodiedDoraPolicyCfg(PolicyCfg):
     """Seconds to wait for one ActionChunk JSON line."""
 
     ee_action_scale: float = 2.0
-    """Scale EE deltas before clip (Arena DifferentialIK often uses scale=0.5)."""
+    """legacy action_unit only: scale EE deltas before clip."""
 
     ee_pos_clip: float = 0.10
     ee_rot_clip: float = 0.5
@@ -79,5 +79,9 @@ class EmbodiedDoraPolicyCfg(PolicyCfg):
     state_ablation: str = "none"
     # Near-π axis-angle: flip into LIBERO training hemisphere (default on for Arena).
     align_axis_angle: bool = True
+    # Offset Arena env-relative eef into LIBERO training world-ish frame.
+    align_eef_frame: bool = True
+    # libero_osc (default): OSC [-1,1] controller units → DiffIK; legacy: ee_action_scale.
+    action_unit: str = "libero_osc"
     # Log first N predict diagnostics (state z-scores + chunk action stats).
     diag_log_chunks: int = 3

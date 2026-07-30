@@ -65,4 +65,6 @@ class EmbodiedLerobotAsyncPolicyCfg(PolicyCfg):
     flip_hw_180: bool = False
     state_ablation: str = "none"
     align_axis_angle: bool = True
+    align_eef_frame: bool = True
+    action_unit: str = "libero_osc"
     diag_log_chunks: int = 3

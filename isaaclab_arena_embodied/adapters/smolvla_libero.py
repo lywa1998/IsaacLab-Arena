@@ -6,19 +6,22 @@
 
 """T1 adapter: Arena Franka obs ↔ embodied-rs policy-contract (smolvla_libero).
 
-Aligned with embodied-rs ``deploy/profiles/smolvla_libero.yaml``:
+Aligned with embodied-rs ``deploy/profiles/smolvla_libero.yaml`` and LeRobot
+``LiberoProcessorStep`` / OSC_POSE training domain:
 
 * state: eef_pos(3) + axis_angle(3) + gripper_qpos(2)  → dim 8
 * images: camera1=agentview, camera2=wrist, camera3=empty @ 256²;
-  optional 180° H+W flip (default off for Arena); RGB f32 CHW in ~[0, 1]
-* action: 7-D relative EE + grip (no second unnorm here)
+  optional 180° H+W flip (default off for Arena upright cams); RGB f32 CHW ~[0, 1]
+* action: 7-D relative EE + grip (unnorm only in PolicyEngine / LeRobot server)
+* domain: ``align_eef_frame`` + ``action_unit=libero_osc`` map Arena env-frame
+  proprio / DiffIK into LIBERO training stats + OSC-normalized action units
 * diagnosis: ``state_ablation`` in {none, zero, mean}
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -62,13 +65,33 @@ LIBERO_STATE_STD = np.array(
 )
 
 # Ablation modes for wire state (diagnosis R2).
-# - none: raw Arena proprio
+# - none: raw Arena proprio (optionally eef-offset)
 # - zero: all-zero vector (still OOD after MEAN_STD for axis-angle)
 # - mean: package training mean → after MEAN_STD ≈ 0 (true proprio neutralize)
 STATE_ABLATION_NONE = "none"
 STATE_ABLATION_ZERO = "zero"
 STATE_ABLATION_MEAN = "mean"
 STATE_ABLATION_MODES = (STATE_ABLATION_NONE, STATE_ABLATION_ZERO, STATE_ABLATION_MEAN)
+
+# --- Training-domain action units (LeRobot LIBERO / robosuite OSC_POSE) ---
+# Unnormalized actions live in ~Box(-1, 1) controller units; OSC multiplies by
+# output_max (pos ≈ 0.05 m, rot ≈ 0.5 rad). Arena FrankaIK DiffIK multiplies
+# env action by scale=0.5, so env_action = a_ctrl * (output_max / ik_scale).
+ACTION_UNIT_LEGACY = "legacy"
+ACTION_UNIT_LIBERO_OSC = "libero_osc"
+ACTION_UNIT_MODES = (ACTION_UNIT_LEGACY, ACTION_UNIT_LIBERO_OSC)
+
+ARENA_DIFFIK_SCALE = 0.5
+LIBERO_OSC_POS_OUTPUT_MAX = 0.05  # meters at |a|=1
+LIBERO_OSC_ROT_OUTPUT_MAX = 0.5  # radians at |a|=1
+LIBERO_OSC_POS_TO_ENV = LIBERO_OSC_POS_OUTPUT_MAX / ARENA_DIFFIK_SCALE  # 0.1
+LIBERO_OSC_ROT_TO_ENV = LIBERO_OSC_ROT_OUTPUT_MAX / ARENA_DIFFIK_SCALE  # 1.0
+
+# Arena ee_frame_pos = target_pos_w - env_origins (not LIBERO/robosuite world).
+# Calibrated on libero_like_lift / cube_goal ready pose (dora diag first frame)
+# so wire eef ≈ LIBERO training mean when the arm is at that ready configuration.
+_ARENA_READY_EEF_APPROX = np.array([0.057, -0.024, 0.250], dtype=np.float32)
+DEFAULT_EEF_POS_OFFSET = (LIBERO_STATE_MEAN[:3] - _ARENA_READY_EEF_APPROX).astype(np.float32)
 
 
 @dataclass(frozen=True)
@@ -114,7 +137,7 @@ class SmolVlaLiberoAdapter:
         self,
         *,
         image_size: int = IMAGE_SIZE,
-        # Arena FrankaIK DifferentialIK uses scale=0.5 → default 2.0 cancels to ~model units.
+        # legacy only: Arena DiffIK scale=0.5 → 2.0 cancelled model units (often saturates).
         ee_action_scale: float = 2.0,
         ee_pos_clip: float = 0.10,
         ee_rot_clip: float = 0.5,
@@ -126,12 +149,20 @@ class SmolVlaLiberoAdapter:
         # Diagnosis: negate EE rotation deltas (rx,ry,rz) before clip.
         invert_ee_rot: bool = False,
         # LIBERO raw cameras need 180° flip; Arena cameras are usually already upright.
-        # Default False for Arena closed-loop; set True only when matching real LIBERO env raw.
+        # Training package is post-flip upright → default False for Arena.
         flip_hw_180: bool = False,
         # Diagnosis: replace wire state (R2 OOD). See STATE_ABLATION_* constants.
         state_ablation: str = STATE_ABLATION_NONE,
         # Near-π axis-angle double-cover: flip into LIBERO stats hemisphere (default on).
         align_axis_angle: bool = True,
+        # Map Arena env-relative eef into LIBERO training world-ish frame (default on).
+        align_eef_frame: bool = True,
+        # Added to Arena eef_pos before packing state. None → DEFAULT_EEF_POS_OFFSET when
+        # align_eef_frame else zeros.
+        eef_pos_offset: Sequence[float] | None = None,
+        # libero_osc: OSC_POSE controller units → DiffIK env actions (training domain).
+        # legacy: single ee_action_scale for pos+rot (old diagnosis path).
+        action_unit: str = ACTION_UNIT_LIBERO_OSC,
     ) -> None:
         self.image_size = int(image_size)
         self.ee_action_scale = float(ee_action_scale)
@@ -150,6 +181,20 @@ class SmolVlaLiberoAdapter:
             )
         self.state_ablation = mode
         self.align_axis_angle = bool(align_axis_angle)
+        self.align_eef_frame = bool(align_eef_frame)
+        if eef_pos_offset is not None:
+            off = np.asarray(eef_pos_offset, dtype=np.float32).reshape(-1)
+            if off.size != 3:
+                raise ValueError(f"eef_pos_offset must have 3 elements, got {off.size}")
+            self.eef_pos_offset = off.astype(np.float32, copy=True)
+        elif self.align_eef_frame:
+            self.eef_pos_offset = DEFAULT_EEF_POS_OFFSET.copy()
+        else:
+            self.eef_pos_offset = np.zeros(3, dtype=np.float32)
+        unit = str(action_unit or ACTION_UNIT_LIBERO_OSC).strip().lower()
+        if unit not in ACTION_UNIT_MODES:
+            raise ValueError(f"action_unit={action_unit!r}; expected one of {ACTION_UNIT_MODES}")
+        self.action_unit = unit
 
     # ------------------------------------------------------------------ extract
 
@@ -178,7 +223,10 @@ class SmolVlaLiberoAdapter:
         else:
             grip = np.zeros(2, dtype=np.float32)
 
-        state = np.concatenate([eef_pos[:3], axis_angle[:3], grip]).astype(np.float32)
+        eef_raw = eef_pos[:3].astype(np.float32, copy=True)
+        # Wire eef in LIBERO training frame (env-relative Arena + constant offset).
+        eef_wire = (eef_raw + self.eef_pos_offset).astype(np.float32)
+        state = np.concatenate([eef_wire, axis_angle[:3], grip]).astype(np.float32)
         assert state.shape == (STATE_DIM,), f"state shape {state.shape}"
 
         agent = self._pick_camera(observation, env_id, self.agentview_keys)
@@ -187,7 +235,7 @@ class SmolVlaLiberoAdapter:
             agentview_hwc=agent,
             wrist_hwc=wrist,
             state=state,
-            eef_pos=eef_pos[:3].astype(np.float32),
+            eef_pos=eef_raw,
             axis_angle=axis_angle[:3].astype(np.float32),
             gripper=grip,
         )
@@ -252,13 +300,16 @@ class SmolVlaLiberoAdapter:
         return raw
 
     def diagnose_state(self, state: np.ndarray) -> dict[str, Any]:
-        """Return raw state, z-scores vs LIBERO stats, and ablation wire state."""
+        """Return wire state, z-scores vs LIBERO stats, and ablation result."""
         raw = np.asarray(state, dtype=np.float32).reshape(-1)
         z = state_z_scores(raw)
         wire = apply_state_ablation(raw, self.state_ablation)
         z_wire = state_z_scores(wire)
         return {
             "state_ablation": self.state_ablation,
+            "align_eef_frame": self.align_eef_frame,
+            "eef_pos_offset": self.eef_pos_offset.tolist(),
+            "action_unit": self.action_unit,
             "raw": raw.tolist(),
             "z_raw": z.tolist(),
             "wire": wire.tolist(),
@@ -268,7 +319,13 @@ class SmolVlaLiberoAdapter:
         }
 
     def action_row_to_env(self, action_7d: np.ndarray) -> np.ndarray:
-        """Map one unnormed 7-D row to Arena ``franka_ik`` action space."""
+        """Map one unnormed 7-D row to Arena ``franka_ik`` action space.
+
+        * ``libero_osc`` (default): treat unnormed action as OSC controller units
+          in ~[-1, 1], map to DiffIK env actions so physical delta ≈ OSC output_max.
+        * ``legacy``: multiply all EE dims by ``ee_action_scale`` (old path; often
+          saturates at ``ee_pos_clip``).
+        """
         a = np.asarray(action_7d, dtype=np.float32).reshape(-1)
         if a.size < ACTION_DIM:
             raise ValueError(f"action dim {a.size} < {ACTION_DIM}")
@@ -277,8 +334,14 @@ class SmolVlaLiberoAdapter:
             out[0:3] *= -1.0
         if self.invert_ee_rot:
             out[3:6] *= -1.0
-        out[0:3] = np.clip(out[0:3] * self.ee_action_scale, -self.ee_pos_clip, self.ee_pos_clip)
-        out[3:6] = np.clip(out[3:6] * self.ee_action_scale, -self.ee_rot_clip, self.ee_rot_clip)
+        if self.action_unit == ACTION_UNIT_LIBERO_OSC:
+            pos_s = LIBERO_OSC_POS_TO_ENV
+            rot_s = LIBERO_OSC_ROT_TO_ENV
+        else:
+            pos_s = self.ee_action_scale
+            rot_s = self.ee_action_scale
+        out[0:3] = np.clip(out[0:3] * pos_s, -self.ee_pos_clip, self.ee_pos_clip)
+        out[3:6] = np.clip(out[3:6] * rot_s, -self.ee_rot_clip, self.ee_rot_clip)
         g = float(out[6])
         if self.invert_gripper:
             g = -g

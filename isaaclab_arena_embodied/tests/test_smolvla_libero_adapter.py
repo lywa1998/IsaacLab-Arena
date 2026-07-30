@@ -13,6 +13,8 @@ import torch
 
 from isaaclab_arena_embodied.adapters.smolvla_libero import (
     ACTION_DIM,
+    DEFAULT_EEF_POS_OFFSET,
+    LIBERO_OSC_POS_TO_ENV,
     LIBERO_STATE_MEAN,
     STATE_DIM,
     SmolVlaLiberoAdapter,
@@ -40,13 +42,23 @@ def _fake_observation(num_envs: int = 1) -> dict:
 
 
 def test_state_layout_dim8():
-    adapter = SmolVlaLiberoAdapter()
+    # No eef offset so layout asserts stay simple.
+    adapter = SmolVlaLiberoAdapter(align_eef_frame=False)
     ex = adapter.extract(_fake_observation(), 0)
     assert ex.state.shape == (STATE_DIM,)
     np.testing.assert_allclose(ex.state[:3], [0.1, 0.2, 0.3], atol=1e-5)
+    np.testing.assert_allclose(ex.eef_pos, [0.1, 0.2, 0.3], atol=1e-5)
     # identity quat → zero axis-angle
     np.testing.assert_allclose(ex.state[3:6], 0.0, atol=1e-5)
     assert ex.state[6] == ex.state[7]  # gripper padded to 2
+
+
+def test_align_eef_frame_offsets_wire_state():
+    adapter = SmolVlaLiberoAdapter(align_eef_frame=True)
+    ex = adapter.extract(_fake_observation(), 0)
+    # Raw arena eef preserved; wire state gets training-domain offset.
+    np.testing.assert_allclose(ex.eef_pos, [0.1, 0.2, 0.3], atol=1e-5)
+    np.testing.assert_allclose(ex.state[:3], np.array([0.1, 0.2, 0.3]) + DEFAULT_EEF_POS_OFFSET, atol=1e-5)
 
 
 def test_observation_wire_cameras_and_flip():
@@ -96,22 +108,36 @@ def test_flip_hw_180():
 
 
 def test_action_row_to_env_dims():
-    adapter = SmolVlaLiberoAdapter(binarize_gripper=True)
+    adapter = SmolVlaLiberoAdapter(binarize_gripper=True, action_unit="libero_osc")
     row = np.array([0.01, 0.0, 0.0, 0.0, 0.0, 0.0, -0.5], dtype=np.float32)
     env_a = adapter.action_row_to_env(row)
     assert env_a.shape == (ACTION_DIM,)
-    assert env_a[6] == -1.0  # closed
+    np.testing.assert_allclose(env_a[0], 0.01 * LIBERO_OSC_POS_TO_ENV, atol=1e-6)
+    assert env_a[6] == -1.0  # LIBERO: negative grip → open (-1)
+
+
+def test_libero_osc_full_scale_no_early_sat():
+    """Controller |a|=1 → env 0.1 → DiffIK 0.05 m (not legacy clip at |a|=0.05)."""
+    adapter = SmolVlaLiberoAdapter(action_unit="libero_osc", ee_pos_clip=0.10, ee_rot_clip=0.5)
+    row = np.array([1.0, -1.0, 0.5, 0.5, 0.0, 0.0, 0.2], dtype=np.float32)
+    env_a = adapter.action_row_to_env(row)
+    np.testing.assert_allclose(env_a[0], 0.10, atol=1e-6)
+    np.testing.assert_allclose(env_a[1], -0.10, atol=1e-6)
+    np.testing.assert_allclose(env_a[2], 0.05, atol=1e-6)
+    np.testing.assert_allclose(env_a[3], 0.5, atol=1e-6)  # rot scale 1.0
 
 
 def test_invert_ee_pos_negates_xyz():
-    adapter = SmolVlaLiberoAdapter(ee_action_scale=1.0, invert_ee_pos=True, binarize_gripper=False)
+    adapter = SmolVlaLiberoAdapter(
+        action_unit="legacy", ee_action_scale=1.0, invert_ee_pos=True, binarize_gripper=False
+    )
     row = np.array([0.05, -0.02, 0.03, 0.0, 0.0, 0.0, 0.1], dtype=np.float32)
     env_a = adapter.action_row_to_env(row)
     np.testing.assert_allclose(env_a[:3], [-0.05, 0.02, -0.03], atol=1e-5)
 
 
 def test_chunk_to_env():
-    adapter = SmolVlaLiberoAdapter()
+    adapter = SmolVlaLiberoAdapter(action_unit="libero_osc")
     chunk = np.zeros((10, 7), dtype=np.float32)
     chunk[:, 6] = 0.5
     out = adapter.chunk_to_env(chunk)
@@ -152,7 +178,7 @@ def test_identity_quat_state_is_ood_on_axis_angle():
 
     Identity is a true pose mismatch (not double-cover); align does not invent π.
     """
-    adapter = SmolVlaLiberoAdapter(align_axis_angle=True)
+    adapter = SmolVlaLiberoAdapter(align_axis_angle=True, align_eef_frame=False)
     ex = adapter.extract(_fake_observation(), 0)
     z = state_z_scores(ex.state)
     # dim 3 (axis_angle[0]): mean ~2.97, std ~0.34 → z ≈ -8.6 for zero aa

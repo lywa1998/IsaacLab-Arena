@@ -46,6 +46,8 @@ def _resolve_adapter(name: str, cfg: EmbodiedLerobotAsyncPolicyCfg) -> SmolVlaLi
         flip_hw_180=cfg.flip_hw_180,
         state_ablation=cfg.state_ablation,
         align_axis_angle=cfg.align_axis_angle,
+        align_eef_frame=cfg.align_eef_frame,
+        action_unit=cfg.action_unit,
     )
 
 
@@ -73,6 +75,7 @@ class EmbodiedLerobotAsyncPolicy(PolicyBase[EmbodiedLerobotAsyncPolicyCfg]):
             f"[EmbodiedLerobotAsyncPolicy] server={config.server_host}:{config.server_port} "
             f"lerobot_policy_type={config.lerobot_policy_type} path={config.pretrained_name_or_path} "
             f"server_device={config.server_policy_device} flip={config.flip_hw_180} "
+            f"action_unit={config.action_unit} align_eef_frame={config.align_eef_frame} "
             f"align_aa={config.align_axis_angle} invert_ee_pos={config.invert_ee_pos} "
             f"state_ablation={config.state_ablation}"
         )
