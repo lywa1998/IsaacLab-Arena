@@ -119,11 +119,17 @@ class SmolVlaLiberoAdapter:
         invert_gripper: bool = False,
         binarize_gripper: bool = True,
         gripper_deadzone: float = 0.0,
+        # Diagnosis: negate EE position deltas (xyz) before clip — action-frame A/B.
+        invert_ee_pos: bool = False,
+        # Diagnosis: negate EE rotation deltas (rx,ry,rz) before clip.
+        invert_ee_rot: bool = False,
         # LIBERO raw cameras need 180° flip; Arena cameras are usually already upright.
         # Default False for Arena closed-loop; set True only when matching real LIBERO env raw.
         flip_hw_180: bool = False,
         # Diagnosis: replace wire state (R2 OOD). See STATE_ABLATION_* constants.
         state_ablation: str = STATE_ABLATION_NONE,
+        # Near-π axis-angle double-cover: flip into LIBERO stats hemisphere (default on).
+        align_axis_angle: bool = True,
     ) -> None:
         self.image_size = int(image_size)
         self.ee_action_scale = float(ee_action_scale)
@@ -132,6 +138,8 @@ class SmolVlaLiberoAdapter:
         self.invert_gripper = bool(invert_gripper)
         self.binarize_gripper = bool(binarize_gripper)
         self.gripper_deadzone = float(gripper_deadzone)
+        self.invert_ee_pos = bool(invert_ee_pos)
+        self.invert_ee_rot = bool(invert_ee_rot)
         self.flip_hw_180 = bool(flip_hw_180)
         mode = str(state_ablation or STATE_ABLATION_NONE).strip().lower()
         if mode not in STATE_ABLATION_MODES:
@@ -139,6 +147,7 @@ class SmolVlaLiberoAdapter:
                 f"state_ablation={state_ablation!r}; expected one of {STATE_ABLATION_MODES}"
             )
         self.state_ablation = mode
+        self.align_axis_angle = bool(align_axis_angle)
 
     # ------------------------------------------------------------------ extract
 
@@ -151,6 +160,8 @@ class SmolVlaLiberoAdapter:
             axis_angle = quat_xyzw_to_axis_angle(self._vec(proprio, "eef_quat", env_id, default=None))
         else:
             axis_angle = np.zeros(3, dtype=np.float32)
+        if self.align_axis_angle:
+            axis_angle = align_axis_angle_to_libero(axis_angle)
 
         if "gripper_pos" in proprio:
             grip = to_numpy(proprio["gripper_pos"][env_id]).astype(np.float32).reshape(-1)
@@ -233,6 +244,10 @@ class SmolVlaLiberoAdapter:
         if a.size < ACTION_DIM:
             raise ValueError(f"action dim {a.size} < {ACTION_DIM}")
         out = a[:ACTION_DIM].copy()
+        if self.invert_ee_pos:
+            out[0:3] *= -1.0
+        if self.invert_ee_rot:
+            out[3:6] *= -1.0
         out[0:3] = np.clip(out[0:3] * self.ee_action_scale, -self.ee_pos_clip, self.ee_pos_clip)
         out[3:6] = np.clip(out[3:6] * self.ee_action_scale, -self.ee_rot_clip, self.ee_rot_clip)
         g = float(out[6])
@@ -376,21 +391,55 @@ def hwc_uint8_to_chw_f32(img: np.ndarray) -> np.ndarray:
 
 
 def quat_xyzw_to_axis_angle(q: np.ndarray) -> np.ndarray:
-    """Quaternion xyzw → axis-angle (3,)."""
+    """Quaternion xyzw → axis-angle (3,), matching LeRobot ``LiberoProcessorStep._quat2axisangle``.
+
+    Important: do **not** force ``w >= 0``. LeRobot keeps the raw ``w`` sign so that
+    ``w < 0`` yields angle ``> π``. Forcing the other double-cover maps near-π poses
+    into the opposite axis-angle hemisphere (e.g. ``−π`` vs training mean ``+π``),
+    which explodes MEAN_STD z-scores (~18σ on Arena first frame).
+    """
     q = np.asarray(q, dtype=np.float32).reshape(-1)
     if q.size < 4:
         return np.zeros(3, dtype=np.float32)
     x, y, z, w = float(q[0]), float(q[1]), float(q[2]), float(q[3])
-    # Normalize
     n = (x * x + y * y + z * z + w * w) ** 0.5
     if n < 1e-8:
         return np.zeros(3, dtype=np.float32)
     x, y, z, w = x / n, y / n, z / n, w / n
-    if w < 0:
-        x, y, z, w = -x, -y, -z, -w
-    angle = 2.0 * float(np.arccos(np.clip(w, -1.0, 1.0)))
-    s = (1.0 - w * w) ** 0.5
-    if s < 1e-6:
+    w = float(np.clip(w, -1.0, 1.0))
+    den = float(np.sqrt(max(1.0 - w * w, 0.0)))
+    if den <= 1e-10:
         return np.zeros(3, dtype=np.float32)
-    axis = np.array([x / s, y / s, z / s], dtype=np.float32)
+    angle = 2.0 * float(np.arccos(w))
+    axis = np.array([x / den, y / den, z / den], dtype=np.float32)
     return (axis * angle).astype(np.float32)
+
+
+def align_axis_angle_to_libero(
+    aa: np.ndarray,
+    mean: np.ndarray | None = None,
+    *,
+    pi_band: float = 0.75,
+) -> np.ndarray:
+    """Flip near-π axis-angle into the LIBERO stats hemisphere when safer.
+
+    For θ ≈ π, ``R(n, π) ≈ R(−n, π)`` so ``−aa`` is nearly the same SO(3) pose but
+    lands next to training ``observation.state.mean[3:6] ≈ (+π, …)`` instead of
+    ``(−π, …)`` (which is ~18σ OOD under MEAN_STD).
+
+    Only flips when ``|‖aa‖ − π| < pi_band`` and ``−aa`` is closer to ``mean``.
+    """
+    aa = np.asarray(aa, dtype=np.float32).reshape(-1)
+    if aa.size < 3:
+        out = np.zeros(3, dtype=np.float32)
+        out[: aa.size] = aa
+        return out
+    aa = aa[:3].astype(np.float32, copy=True)
+    m = np.asarray(mean if mean is not None else LIBERO_STATE_MEAN[3:6], dtype=np.float32).reshape(-1)[:3]
+    angle = float(np.linalg.norm(aa))
+    if abs(angle - float(np.pi)) > float(pi_band):
+        return aa
+    flipped = (-aa).astype(np.float32)
+    if float(np.linalg.norm(flipped - m)) < float(np.linalg.norm(aa - m)):
+        return flipped
+    return aa

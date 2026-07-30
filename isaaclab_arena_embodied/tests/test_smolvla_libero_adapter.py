@@ -16,6 +16,7 @@ from isaaclab_arena_embodied.adapters.smolvla_libero import (
     LIBERO_STATE_MEAN,
     STATE_DIM,
     SmolVlaLiberoAdapter,
+    align_axis_angle_to_libero,
     apply_state_ablation,
     flip_hw_180,
     quat_xyzw_to_axis_angle,
@@ -102,6 +103,13 @@ def test_action_row_to_env_dims():
     assert env_a[6] == -1.0  # closed
 
 
+def test_invert_ee_pos_negates_xyz():
+    adapter = SmolVlaLiberoAdapter(ee_action_scale=1.0, invert_ee_pos=True, binarize_gripper=False)
+    row = np.array([0.05, -0.02, 0.03, 0.0, 0.0, 0.0, 0.1], dtype=np.float32)
+    env_a = adapter.action_row_to_env(row)
+    np.testing.assert_allclose(env_a[:3], [-0.05, 0.02, -0.03], atol=1e-5)
+
+
 def test_chunk_to_env():
     adapter = SmolVlaLiberoAdapter()
     chunk = np.zeros((10, 7), dtype=np.float32)
@@ -116,13 +124,54 @@ def test_quat_identity():
     np.testing.assert_allclose(aa, 0.0, atol=1e-5)
 
 
+def test_quat2aa_matches_lerobot_no_w_flip():
+    """LeRobot keeps w sign; w≈0- yields angle slightly above π (positive hemisphere)."""
+    # Double-cover of near-π rotation around +x
+    q_pos_w = np.array([0.9997, 0.0, 0.0, 0.0023], dtype=np.float32)
+    q_neg_w = -q_pos_w
+    aa_pos = quat_xyzw_to_axis_angle(q_pos_w)
+    aa_neg = quat_xyzw_to_axis_angle(q_neg_w)
+    # Opposite double-cover → opposite axis-angle hemisphere
+    assert aa_pos[0] * aa_neg[0] < 0
+    # With align, both land near LIBERO mean hemisphere (+π)
+    al_pos = align_axis_angle_to_libero(aa_pos)
+    al_neg = align_axis_angle_to_libero(aa_neg)
+    assert al_pos[0] > 2.5 and al_neg[0] > 2.5
+
+
+def test_align_axis_angle_near_pi_to_libero_mean():
+    raw = np.array([-3.136, -0.008, -0.078], dtype=np.float32)
+    aligned = align_axis_angle_to_libero(raw)
+    assert aligned[0] > 0
+    z = state_z_scores(np.concatenate([np.zeros(3), aligned, np.zeros(2)]))
+    assert abs(z[3]) < 1.0  # was ~18σ before flip
+
+
 def test_identity_quat_state_is_ood_on_axis_angle():
-    """Arena identity orientation → axis_angle≈0 vs LIBERO mean≈π → severe OOD."""
-    adapter = SmolVlaLiberoAdapter()
+    """Arena identity orientation → axis_angle≈0 vs LIBERO mean≈π → still OOD on angle.
+
+    Identity is a true pose mismatch (not double-cover); align does not invent π.
+    """
+    adapter = SmolVlaLiberoAdapter(align_axis_angle=True)
     ex = adapter.extract(_fake_observation(), 0)
     z = state_z_scores(ex.state)
-    # dim 3 (axis_angle[0]): mean ~2.97, std ~0.34 → z ≈ -8.6
+    # dim 3 (axis_angle[0]): mean ~2.97, std ~0.34 → z ≈ -8.6 for zero aa
     assert z[3] < -5.0
+
+
+def test_extract_aligns_near_pi_quat():
+    """Near-π quat that raw-converts to −π is flipped into +π hemisphere."""
+    adapter = SmolVlaLiberoAdapter(align_axis_angle=True)
+    # Build quat for aa ≈ −π on x (w small positive, x negative)
+    angle = 3.136
+    half = angle / 2.0
+    q = np.array([-np.sin(half), 0.0, 0.0, np.cos(half)], dtype=np.float32)
+    obs = _fake_observation()
+    obs["policy"]["eef_quat"] = torch.tensor([q.tolist()], dtype=torch.float32)
+    ex = adapter.extract(obs, 0)
+    assert ex.axis_angle[0] > 2.5
+    z = state_z_scores(ex.state)
+    assert abs(z[3]) < 2.0
 
 
 def test_state_ablation_zero_and_mean():

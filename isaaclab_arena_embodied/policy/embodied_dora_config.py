@@ -70,9 +70,14 @@ class EmbodiedDoraPolicyCfg(PolicyCfg):
     ee_rot_clip: float = 0.5
     invert_gripper: bool = False
     binarize_gripper: bool = True
+    # Diagnosis: negate EE position / rotation deltas (action-frame A/B).
+    invert_ee_pos: bool = False
+    invert_ee_rot: bool = False
     # Arena cameras are typically upright; LIBERO raw needs 180° flip.
     flip_hw_180: bool = False
     # Diagnosis R2: none | zero | mean (LIBERO package mean → post-norm ≈ 0).
     state_ablation: str = "none"
+    # Near-π axis-angle: flip into LIBERO training hemisphere (default on for Arena).
+    align_axis_angle: bool = True
     # Log first N predict diagnostics (state z-scores + chunk action stats).
     diag_log_chunks: int = 3
