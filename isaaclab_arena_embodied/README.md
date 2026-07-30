@@ -60,6 +60,27 @@ python isaaclab_arena/evaluation/policy_runner.py \
 
 Prefer embodiment **`franka_ik`** (7-D relative EE) over absolute joint_pos for `smolvla_libero`.
 
+## LIBERO-like scene (recommended for adapter smoke)
+
+Environment name: **`libero_like_lift`** (`isaaclab_arena_environments/libero_like_lift_environment.py`).
+
+| 项 | 选择 |
+|----|------|
+| 成功 | **仅抬高**（`target_z_range`，无 yaw-90） |
+| 控制 | `franka_ik` relative EE |
+| 相机 | agentview + wrist @ 256² |
+| 指令 | 默认 `pick up the cube` |
+
+```bash
+# Dora
+BACKEND=dora bash scripts/run_arena_libero_like_eval.sh   # from embodied-rs root on university
+
+# LeRobot async (server already on :8080)
+BACKEND=async bash scripts/run_arena_libero_like_eval.sh
+```
+
+Still **not** bit-exact MuJoCo LIBERO — for true suite SR use `scripts/run_lerobot_libero_eval.sh`.
+
 ## Eval: LeRobot async server + Arena client
 
 Terminal A — start LeRobot policy server (loads model on first client `SendPolicyInstructions`):

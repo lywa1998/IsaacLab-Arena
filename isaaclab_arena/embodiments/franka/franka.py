@@ -242,13 +242,39 @@ class FrankaSceneCfg:
 
 @configclass
 class FrankaCameraCfg(ArenaCameraCfg):
-    """Configuration for cameras."""
+    """Franka camera rig — LIBERO-style agentview + wrist (256² for VLA eval).
+
+    * ``agentview_cam`` → smolvla ``camera1`` (elevated third-person, OpenGL)
+    * ``wrist_cam`` → smolvla ``camera2`` (eye-in-hand, ROS)
+    """
+
+    # Third-person / agentview-like. Scene (cube_goal / libero_like): robot base
+    # ~(-0.4,0,0), cube ~(0.1,0,0.2) → workspace ahead of robot.
+    agentview_cam: CameraCfg = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/agentview_cam",
+        update_period=0.0,
+        height=256,
+        width=256,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=12.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            vertical_aperture=15.2908,
+            clipping_range=(0.05, 10.0),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(0.90, -0.60, 0.72),
+            rot=(0.406284, 0.123013, 0.262379, 0.866579),
+            convention="opengl",
+        ),
+    )
 
     wrist_cam: CameraCfg = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/panda_hand/wrist_cam",
         update_period=0.0,
-        height=84,
-        width=84,
+        height=256,
+        width=256,
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=2.8, focus_distance=28, horizontal_aperture=5.376, vertical_aperture=3.024
