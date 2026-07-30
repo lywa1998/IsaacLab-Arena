@@ -1,0 +1,96 @@
+# Copyright (c) 2026, The Isaac Lab Arena Project Developers
+# (https://github.com/isaac-sim/IsaacLab-Arena/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Unit tests for T1 smolvla_libero adapter (no Isaac / no dora-policy)."""
+
+from __future__ import annotations
+
+import numpy as np
+import torch
+
+from isaaclab_arena_embodied.adapters.smolvla_libero import (
+    ACTION_DIM,
+    STATE_DIM,
+    SmolVlaLiberoAdapter,
+    flip_hw_180,
+    quat_xyzw_to_axis_angle,
+)
+
+
+def _fake_observation(num_envs: int = 1) -> dict:
+    return {
+        "camera_obs": {
+            "external_camera_rgb": torch.zeros((num_envs, 128, 160, 3), dtype=torch.uint8),
+            "wrist_camera_rgb": torch.full((num_envs, 128, 160, 3), 40, dtype=torch.uint8),
+        },
+        "policy": {
+            "eef_pos": torch.tensor([[0.1, 0.2, 0.3]], dtype=torch.float32).expand(num_envs, -1).clone(),
+            "eef_quat": torch.tensor([[0.0, 0.0, 0.0, 1.0]], dtype=torch.float32).expand(num_envs, -1).clone(),
+            "gripper_pos": torch.tensor([[0.04]], dtype=torch.float32).expand(num_envs, -1).clone(),
+            "joint_pos": torch.zeros((num_envs, 7), dtype=torch.float32),
+        },
+    }
+
+
+def test_state_layout_dim8():
+    adapter = SmolVlaLiberoAdapter()
+    ex = adapter.extract(_fake_observation(), 0)
+    assert ex.state.shape == (STATE_DIM,)
+    np.testing.assert_allclose(ex.state[:3], [0.1, 0.2, 0.3], atol=1e-5)
+    # identity quat → zero axis-angle
+    np.testing.assert_allclose(ex.state[3:6], 0.0, atol=1e-5)
+    assert ex.state[6] == ex.state[7]  # gripper padded to 2
+
+
+def test_observation_wire_cameras_and_flip():
+    adapter = SmolVlaLiberoAdapter(image_size=64)
+    # Distinct pattern so flip is observable.
+    obs = _fake_observation()
+    img = np.zeros((128, 160, 3), dtype=np.uint8)
+    img[0, 0, :] = 255
+    obs["camera_obs"]["external_camera_rgb"][0] = torch.from_numpy(img)
+    ex = adapter.extract(obs, 0)
+    wire = adapter.to_observation_wire(ex, instruction="pick the cube", unnorm_key="default")
+    assert wire["instruction"] == "pick the cube"
+    assert len(wire["images"]) == 3
+    assert wire["images"][0]["key"] == "camera1"
+    assert wire["images"][1]["key"] == "camera2"
+    assert wire["images"][2]["key"] == "camera3"
+    assert wire["images"][0]["c"] == 3
+    assert wire["images"][0]["h"] == 64
+    assert wire["images"][0]["w"] == 64
+    assert len(wire["images"][0]["data"]) == 3 * 64 * 64
+    assert wire["state"] is not None and len(wire["state"]) == STATE_DIM
+    # camera3 is zeros
+    assert max(wire["images"][2]["data"]) == 0.0
+
+
+def test_flip_hw_180():
+    img = np.arange(3 * 4 * 3, dtype=np.uint8).reshape(3, 4, 3)
+    flipped = flip_hw_180(img)
+    np.testing.assert_array_equal(flipped[0, 0], img[-1, -1])
+
+
+def test_action_row_to_env_dims():
+    adapter = SmolVlaLiberoAdapter(binarize_gripper=True)
+    row = np.array([0.01, 0.0, 0.0, 0.0, 0.0, 0.0, -0.5], dtype=np.float32)
+    env_a = adapter.action_row_to_env(row)
+    assert env_a.shape == (ACTION_DIM,)
+    assert env_a[6] == -1.0  # closed
+
+
+def test_chunk_to_env():
+    adapter = SmolVlaLiberoAdapter()
+    chunk = np.zeros((10, 7), dtype=np.float32)
+    chunk[:, 6] = 0.5
+    out = adapter.chunk_to_env(chunk)
+    assert out.shape == (10, 7)
+    assert np.all(out[:, 6] == 1.0)
+
+
+def test_quat_identity():
+    aa = quat_xyzw_to_axis_angle(np.array([0, 0, 0, 1], dtype=np.float32))
+    np.testing.assert_allclose(aa, 0.0, atol=1e-5)
