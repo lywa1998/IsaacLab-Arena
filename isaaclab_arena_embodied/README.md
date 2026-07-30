@@ -64,5 +64,6 @@ Prefer embodiment **`franka_ik`** (7-D relative EE) over absolute joint_pos for 
 See embodied-rs `deploy/profiles/smolvla_libero.yaml`:
 
 - state dim **8**: eef_pos + axis_angle + gripper_qpos(2)
-- images: camera1/2/3, **180° flip** on 1/2, 256²
+- images: camera1/2/3, 256²; **flip_hw_180 default false** (Arena upright)
 - action dim **7**, unnorm only in dora-policy
+- diagnosis: `--state_ablation none|zero|mean`, `--diag_log_chunks N`

@@ -13,10 +13,13 @@ import torch
 
 from isaaclab_arena_embodied.adapters.smolvla_libero import (
     ACTION_DIM,
+    LIBERO_STATE_MEAN,
     STATE_DIM,
     SmolVlaLiberoAdapter,
+    apply_state_ablation,
     flip_hw_180,
     quat_xyzw_to_axis_angle,
+    state_z_scores,
 )
 
 
@@ -111,3 +114,33 @@ def test_chunk_to_env():
 def test_quat_identity():
     aa = quat_xyzw_to_axis_angle(np.array([0, 0, 0, 1], dtype=np.float32))
     np.testing.assert_allclose(aa, 0.0, atol=1e-5)
+
+
+def test_identity_quat_state_is_ood_on_axis_angle():
+    """Arena identity orientation → axis_angle≈0 vs LIBERO mean≈π → severe OOD."""
+    adapter = SmolVlaLiberoAdapter()
+    ex = adapter.extract(_fake_observation(), 0)
+    z = state_z_scores(ex.state)
+    # dim 3 (axis_angle[0]): mean ~2.97, std ~0.34 → z ≈ -8.6
+    assert z[3] < -5.0
+
+
+def test_state_ablation_zero_and_mean():
+    raw = np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, 0.04], dtype=np.float32)
+    z0 = apply_state_ablation(raw, "zero")
+    np.testing.assert_allclose(z0, 0.0)
+    zm = apply_state_ablation(raw, "mean")
+    np.testing.assert_allclose(zm, LIBERO_STATE_MEAN, atol=1e-5)
+    # mean → near-zero z after MEAN_STD
+    z_scores = state_z_scores(zm)
+    np.testing.assert_allclose(z_scores, 0.0, atol=1e-4)
+
+
+def test_observation_wire_respects_state_ablation_mean():
+    adapter = SmolVlaLiberoAdapter(image_size=32, state_ablation="mean")
+    ex = adapter.extract(_fake_observation(), 0)
+    wire = adapter.to_observation_wire(ex, instruction="pick")
+    np.testing.assert_allclose(wire["state"], LIBERO_STATE_MEAN.tolist(), atol=1e-5)
+    diag = adapter.diagnose_state(ex.state)
+    assert diag["max_abs_z_wire"] < 1e-3
+    assert diag["max_abs_z_raw"] > 5.0

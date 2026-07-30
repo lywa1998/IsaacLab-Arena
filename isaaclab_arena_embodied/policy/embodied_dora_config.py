@@ -72,3 +72,7 @@ class EmbodiedDoraPolicyCfg(PolicyCfg):
     binarize_gripper: bool = True
     # Arena cameras are typically upright; LIBERO raw needs 180° flip.
     flip_hw_180: bool = False
+    # Diagnosis R2: none | zero | mean (LIBERO package mean → post-norm ≈ 0).
+    state_ablation: str = "none"
+    # Log first N predict diagnostics (state z-scores + chunk action stats).
+    diag_log_chunks: int = 3

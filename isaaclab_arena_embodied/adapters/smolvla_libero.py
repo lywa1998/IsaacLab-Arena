@@ -10,8 +10,9 @@ Aligned with embodied-rs ``deploy/profiles/smolvla_libero.yaml``:
 
 * state: eef_pos(3) + axis_angle(3) + gripper_qpos(2)  → dim 8
 * images: camera1=agentview, camera2=wrist, camera3=empty @ 256²;
-  camera1/2 get 180° H+W flip; RGB f32 CHW in ~[0, 1]
+  optional 180° H+W flip (default off for Arena); RGB f32 CHW in ~[0, 1]
 * action: 7-D relative EE + grip (no second unnorm here)
+* diagnosis: ``state_ablation`` in {none, zero, mean}
 """
 
 from __future__ import annotations
@@ -28,6 +29,44 @@ ACTION_DIM = 7
 CAMERA1_KEY = "camera1"
 CAMERA2_KEY = "camera2"
 CAMERA3_KEY = "camera3"
+
+# From models/lerobot/smolvla_libero policy_preprocessor normalizer
+# (observation.state.mean / .std). Used for OOD z-score logs and state_ablation=mean.
+LIBERO_STATE_MEAN = np.array(
+    [
+        -0.04651878,
+        0.03440907,
+        0.7645525,
+        2.9722095,
+        -0.22046979,
+        -0.1255794,
+        0.02691425,
+        -0.02719078,
+    ],
+    dtype=np.float32,
+)
+LIBERO_STATE_STD = np.array(
+    [
+        0.10494395,
+        0.1517662,
+        0.37851673,
+        0.34427372,
+        0.90694684,
+        0.32539192,
+        0.0141759,
+        0.01405889,
+    ],
+    dtype=np.float32,
+)
+
+# Ablation modes for wire state (diagnosis R2).
+# - none: raw Arena proprio
+# - zero: all-zero vector (still OOD after MEAN_STD for axis-angle)
+# - mean: package training mean → after MEAN_STD ≈ 0 (true proprio neutralize)
+STATE_ABLATION_NONE = "none"
+STATE_ABLATION_ZERO = "zero"
+STATE_ABLATION_MEAN = "mean"
+STATE_ABLATION_MODES = (STATE_ABLATION_NONE, STATE_ABLATION_ZERO, STATE_ABLATION_MEAN)
 
 
 @dataclass(frozen=True)
@@ -83,6 +122,8 @@ class SmolVlaLiberoAdapter:
         # LIBERO raw cameras need 180° flip; Arena cameras are usually already upright.
         # Default False for Arena closed-loop; set True only when matching real LIBERO env raw.
         flip_hw_180: bool = False,
+        # Diagnosis: replace wire state (R2 OOD). See STATE_ABLATION_* constants.
+        state_ablation: str = STATE_ABLATION_NONE,
     ) -> None:
         self.image_size = int(image_size)
         self.ee_action_scale = float(ee_action_scale)
@@ -92,6 +133,12 @@ class SmolVlaLiberoAdapter:
         self.binarize_gripper = bool(binarize_gripper)
         self.gripper_deadzone = float(gripper_deadzone)
         self.flip_hw_180 = bool(flip_hw_180)
+        mode = str(state_ablation or STATE_ABLATION_NONE).strip().lower()
+        if mode not in STATE_ABLATION_MODES:
+            raise ValueError(
+                f"state_ablation={state_ablation!r}; expected one of {STATE_ABLATION_MODES}"
+            )
+        self.state_ablation = mode
 
     # ------------------------------------------------------------------ extract
 
@@ -149,6 +196,7 @@ class SmolVlaLiberoAdapter:
         img1 = hwc_uint8_to_chw_f32(a)
         img2 = hwc_uint8_to_chw_f32(w)
         img3 = np.zeros((3, self.image_size, self.image_size), dtype=np.float32)
+        wire_state = apply_state_ablation(extracted.state, self.state_ablation)
         return {
             "timestamp_ns": int(timestamp_ns),
             "instruction": instruction,
@@ -157,10 +205,26 @@ class SmolVlaLiberoAdapter:
                 image_wire(CAMERA2_KEY, img2),
                 image_wire(CAMERA3_KEY, img3),
             ],
-            "state": extracted.state.astype(np.float32).tolist(),
+            "state": wire_state.astype(np.float32).tolist(),
             "unnorm_key": unnorm_key,
             "vision_features": None,
             "lang_features": None,
+        }
+
+    def diagnose_state(self, state: np.ndarray) -> dict[str, Any]:
+        """Return raw state, z-scores vs LIBERO stats, and ablation wire state."""
+        raw = np.asarray(state, dtype=np.float32).reshape(-1)
+        z = state_z_scores(raw)
+        wire = apply_state_ablation(raw, self.state_ablation)
+        z_wire = state_z_scores(wire)
+        return {
+            "state_ablation": self.state_ablation,
+            "raw": raw.tolist(),
+            "z_raw": z.tolist(),
+            "wire": wire.tolist(),
+            "z_wire": z_wire.tolist(),
+            "max_abs_z_raw": float(np.max(np.abs(z))) if z.size else 0.0,
+            "max_abs_z_wire": float(np.max(np.abs(z_wire))) if z_wire.size else 0.0,
         }
 
     def action_row_to_env(self, action_7d: np.ndarray) -> np.ndarray:
@@ -268,6 +332,42 @@ def resize_hwc(img: np.ndarray, size: int) -> np.ndarray:
 def flip_hw_180(img: np.ndarray) -> np.ndarray:
     """180° rotation = flip H and W (LiberoProcessorStep)."""
     return np.ascontiguousarray(img[::-1, ::-1, ...])
+
+
+def state_z_scores(
+    state: np.ndarray,
+    mean: np.ndarray = LIBERO_STATE_MEAN,
+    std: np.ndarray = LIBERO_STATE_STD,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """MEAN_STD z-scores vs package stats (same as dora-policy preprocessor)."""
+    s = np.asarray(state, dtype=np.float32).reshape(-1)
+    m = np.asarray(mean, dtype=np.float32).reshape(-1)
+    d = np.asarray(std, dtype=np.float32).reshape(-1)
+    n = min(s.size, m.size, d.size)
+    z = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        z[i] = (s[i] - m[i]) / max(abs(float(d[i])), eps)
+    return z
+
+
+def apply_state_ablation(state: np.ndarray, mode: str) -> np.ndarray:
+    """Apply diagnosis ablation to raw Arena state before wire."""
+    raw = np.asarray(state, dtype=np.float32).reshape(-1)
+    if raw.size != STATE_DIM:
+        # Still produce a fixed-size vector for the engine.
+        out = np.zeros(STATE_DIM, dtype=np.float32)
+        n = min(raw.size, STATE_DIM)
+        out[:n] = raw[:n]
+        raw = out
+    mode = str(mode or STATE_ABLATION_NONE).strip().lower()
+    if mode == STATE_ABLATION_ZERO:
+        return np.zeros(STATE_DIM, dtype=np.float32)
+    if mode == STATE_ABLATION_MEAN:
+        return LIBERO_STATE_MEAN.copy()
+    if mode != STATE_ABLATION_NONE:
+        raise ValueError(f"unknown state_ablation={mode!r}")
+    return raw.astype(np.float32, copy=True)
 
 
 def hwc_uint8_to_chw_f32(img: np.ndarray) -> np.ndarray:

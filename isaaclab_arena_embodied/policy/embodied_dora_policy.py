@@ -36,6 +36,7 @@ def _resolve_adapter(name: str, cfg: EmbodiedDoraPolicyCfg) -> SmolVlaLiberoAdap
         invert_gripper=cfg.invert_gripper,
         binarize_gripper=cfg.binarize_gripper,
         flip_hw_180=cfg.flip_hw_180,
+        state_ablation=cfg.state_ablation,
     )
 
 
@@ -57,6 +58,13 @@ class EmbodiedDoraPolicy(PolicyBase[EmbodiedDoraPolicyCfg]):
         self._unnorm_key = config.unnorm_key
         self._adapter = _resolve_adapter(config.embodiment_adapter, config)
         self.task_description: str | None = None
+        self._diag_log_chunks = max(0, int(config.diag_log_chunks))
+        self._diag_logged = 0
+        print(
+            f"[EmbodiedDoraPolicy] adapter=smolvla_libero flip_hw_180={config.flip_hw_180} "
+            f"ee_action_scale={config.ee_action_scale} state_ablation={config.state_ablation} "
+            f"diag_log_chunks={self._diag_log_chunks}"
+        )
 
         self._client: DoraStdioClient | None = None
         if config.spawn_policy or config.attach_command is not None:
@@ -144,6 +152,15 @@ class EmbodiedDoraPolicy(PolicyBase[EmbodiedDoraPolicyCfg]):
             unnorm_key=self._unnorm_key,
             timestamp_ns=time.time_ns(),
         )
+        if self._diag_logged < self._diag_log_chunks:
+            diag = self._adapter.diagnose_state(extracted.state)
+            print(
+                f"[EmbodiedDoraPolicy][diag] env={env_id} chunk={self._diag_logged} "
+                f"ablation={diag['state_ablation']} "
+                f"raw={_fmt_vec(diag['raw'])} z_raw={_fmt_vec(diag['z_raw'])} "
+                f"max|z|raw={diag['max_abs_z_raw']:.2f} "
+                f"wire={_fmt_vec(diag['wire'])} max|z|wire={diag['max_abs_z_wire']:.2f}"
+            )
         chunk_wire = self._client.predict(wire)
         chunk = action_chunk_wire_to_numpy(chunk_wire)
         if chunk.shape[1] < self._action_dim:
@@ -151,7 +168,18 @@ class EmbodiedDoraPolicy(PolicyBase[EmbodiedDoraPolicyCfg]):
         # T1: env action space only (already unnormed by server).
         env_chunk = self._adapter.chunk_to_env(chunk[:, : self._action_dim])
         h = min(self._open_loop_horizon, env_chunk.shape[0])
-        return env_chunk[:h].astype(np.float32, copy=True)
+        out = env_chunk[:h].astype(np.float32, copy=True)
+        if self._diag_logged < self._diag_log_chunks:
+            mean_xyz = out[:, :3].mean(axis=0)
+            first = out[0]
+            print(
+                f"[EmbodiedDoraPolicy][diag] env={env_id} chunk={self._diag_logged} "
+                f"action_first={_fmt_vec(first.tolist())} "
+                f"action_mean_xyz={_fmt_vec(mean_xyz.tolist())} "
+                f"grip_closed_frac={float(np.mean(out[:, 6] < 0)):.2f}"
+            )
+            self._diag_logged += 1
+        return out
 
     def _maybe_init_per_env_state(self, num_envs: int) -> None:
         if self._cached_action_chunks is None:
@@ -184,3 +212,8 @@ class EmbodiedDoraPolicy(PolicyBase[EmbodiedDoraPolicyCfg]):
         """
         _ = kill_server
         self.close()
+
+
+def _fmt_vec(values: list[float] | np.ndarray, nd: int = 3) -> str:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    return "[" + ", ".join(f"{float(v):.{nd}f}" for v in arr) + "]"
