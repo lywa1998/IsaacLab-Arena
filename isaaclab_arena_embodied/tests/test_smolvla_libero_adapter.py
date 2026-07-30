@@ -46,7 +46,7 @@ def test_state_layout_dim8():
 
 
 def test_observation_wire_cameras_and_flip():
-    adapter = SmolVlaLiberoAdapter(image_size=64)
+    adapter = SmolVlaLiberoAdapter(image_size=64, flip_hw_180=True)
     # Distinct pattern so flip is observable.
     obs = _fake_observation()
     img = np.zeros((128, 160, 3), dtype=np.uint8)
@@ -67,6 +67,23 @@ def test_observation_wire_cameras_and_flip():
     # camera3 is zeros
     assert max(wire["images"][2]["data"]) == 0.0
 
+
+def test_arena_camera_keys_preferred():
+    adapter = SmolVlaLiberoAdapter(image_size=32, flip_hw_180=False)
+    obs = {
+        "camera_obs": {
+            "agentview_cam_rgb": torch.full((1, 32, 32, 3), 10, dtype=torch.uint8),
+            "wrist_cam_rgb": torch.full((1, 32, 32, 3), 200, dtype=torch.uint8),
+        },
+        "policy": {
+            "eef_pos": torch.zeros((1, 3), dtype=torch.float32),
+            "eef_quat": torch.tensor([[0.0, 0.0, 0.0, 1.0]], dtype=torch.float32),
+            "gripper_pos": torch.zeros((1, 1), dtype=torch.float32),
+        },
+    }
+    ex = adapter.extract(obs, 0)
+    assert int(ex.agentview_hwc.mean()) < 50
+    assert int(ex.wrist_hwc.mean()) > 150
 
 def test_flip_hw_180():
     img = np.arange(3 * 4 * 3, dtype=np.uint8).reshape(3, 4, 3)

@@ -35,6 +35,7 @@ def _resolve_adapter(name: str, cfg: EmbodiedDoraPolicyCfg) -> SmolVlaLiberoAdap
         ee_rot_clip=cfg.ee_rot_clip,
         invert_gripper=cfg.invert_gripper,
         binarize_gripper=cfg.binarize_gripper,
+        flip_hw_180=cfg.flip_hw_180,
     )
 
 

@@ -63,10 +63,12 @@ class EmbodiedDoraPolicyCfg(PolicyCfg):
     predict_timeout_s: float = 120.0
     """Seconds to wait for one ActionChunk JSON line."""
 
-    ee_action_scale: float = 1.0
-    """Scale EE delta dims before clip (Arena IK scale may need 2.0)."""
+    ee_action_scale: float = 2.0
+    """Scale EE deltas before clip (Arena DifferentialIK often uses scale=0.5)."""
 
     ee_pos_clip: float = 0.10
     ee_rot_clip: float = 0.5
     invert_gripper: bool = False
     binarize_gripper: bool = True
+    # Arena cameras are typically upright; LIBERO raw needs 180° flip.
+    flip_hw_180: bool = False

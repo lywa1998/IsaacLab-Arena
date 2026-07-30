@@ -54,15 +54,17 @@ class SmolVlaLiberoAdapter:
     arena_policy_obs_group = "policy"
 
     # Arena camera key candidates → agentview / wrist.
+    # Prefer exact Arena cube_goal names first (`agentview_cam_rgb`, `wrist_cam_rgb`).
     agentview_keys = (
+        "agentview_cam_rgb",
         "external_camera_rgb",
         "robot_pov_cam_rgb",
         "agentview_rgb",
         "agentview_image",
     )
     wrist_keys = (
-        "wrist_camera_rgb",
         "wrist_cam_rgb",
+        "wrist_camera_rgb",
         "eye_in_hand_rgb",
         "robot0_eye_in_hand_image",
     )
@@ -71,12 +73,16 @@ class SmolVlaLiberoAdapter:
         self,
         *,
         image_size: int = IMAGE_SIZE,
-        ee_action_scale: float = 1.0,
+        # Arena FrankaIK DifferentialIK uses scale=0.5 → default 2.0 cancels to ~model units.
+        ee_action_scale: float = 2.0,
         ee_pos_clip: float = 0.10,
         ee_rot_clip: float = 0.5,
         invert_gripper: bool = False,
         binarize_gripper: bool = True,
         gripper_deadzone: float = 0.0,
+        # LIBERO raw cameras need 180° flip; Arena cameras are usually already upright.
+        # Default False for Arena closed-loop; set True only when matching real LIBERO env raw.
+        flip_hw_180: bool = False,
     ) -> None:
         self.image_size = int(image_size)
         self.ee_action_scale = float(ee_action_scale)
@@ -85,6 +91,7 @@ class SmolVlaLiberoAdapter:
         self.invert_gripper = bool(invert_gripper)
         self.binarize_gripper = bool(binarize_gripper)
         self.gripper_deadzone = float(gripper_deadzone)
+        self.flip_hw_180 = bool(flip_hw_180)
 
     # ------------------------------------------------------------------ extract
 
@@ -134,8 +141,13 @@ class SmolVlaLiberoAdapter:
         timestamp_ns: int = 0,
     ) -> dict[str, Any]:
         """Build ObservationWire JSON-serializable dict for dora-policy."""
-        img1 = hwc_uint8_to_chw_f32(flip_hw_180(resize_hwc(extracted.agentview_hwc, self.image_size)))
-        img2 = hwc_uint8_to_chw_f32(flip_hw_180(resize_hwc(extracted.wrist_hwc, self.image_size)))
+        a = resize_hwc(extracted.agentview_hwc, self.image_size)
+        w = resize_hwc(extracted.wrist_hwc, self.image_size)
+        if self.flip_hw_180:
+            a = flip_hw_180(a)
+            w = flip_hw_180(w)
+        img1 = hwc_uint8_to_chw_f32(a)
+        img2 = hwc_uint8_to_chw_f32(w)
         img3 = np.zeros((3, self.image_size, self.image_size), dtype=np.float32)
         return {
             "timestamp_ns": int(timestamp_ns),
